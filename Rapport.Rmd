@@ -1,6 +1,6 @@
 ---
 title: "Devoir 2"
-author: "Bouchra Rabaa, Youssef, Benjamin & Mustapha Bouhsen"
+author: "Mustapha Bouhsen"
 date: "19 avril 2023"
 output: 
   html_document:
