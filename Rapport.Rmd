@@ -1,0 +1,503 @@
+---
+title: "Devoir 2"
+author: "Bouchra Rabaa, Youssef, Benjamin & Mustapha Bouhsen"
+date: "19 avril 2023"
+output: 
+  html_document:
+    toc: true
+    toc_depth: 3
+    number_sections: true
+    theme: cosmo
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r paquetages, message=FALSE, eval=TRUE, include=FALSE, echo = FALSE}
+### Liste des paquetages
+liste.paquetage <- c("here", "quantmod", "xts", "RiskPortfolios", "PerformanceAnalytics", "kableExtra", "GAS")
+
+### On installe les paquetages de la liste qu'on a pas déjà
+inst <- liste.paquetage %in% installed.packages()
+if(length(liste.paquetage[!inst]) > 0) install.packages(liste.paquetage[!inst])
+
+lapply(liste.paquetage, require, character.only = TRUE)
+
+library("here")
+library("quantmod")
+library("kableExtra")
+library("mvtnorm")
+library("xts")
+library("fGarch")
+library("copula")
+library("MASS")
+library("RiskPortfolios")
+library("PerformanceAnalytics")
+library("kableExtra")
+library("GAS")
+```
+
+```{r echo=FALSE}
+# Importation des fonctions
+source("source.R")
+
+# Importation des donnees
+load(here("data", "Market.rda"))
+
+SP500 <- Market[["sp500"]]
+VIX <- Market[["vix"]]
+rf <- Market[["rf"]]
+call <- Market[["calls"]]
+put  <- Market[["puts"]]
+```
+
+
+# Fixation du prix d'un portefeuille d'option
+
+Nous avons un portfeuille de 4 option d'achat européenne avec strike `k` et echéance `T` en jours:
+
+$$
+K = 1600, \ T =20
+\\
+K = 1650, \ T =20
+\\
+K = 1750, \ T =40
+\\
+K = 1800, \ T =40
+\\
+$$
+
+Pour calculer le prix du portfeuille, nous allons uiliser la formule de Balck-Scholes en posant :
+
+$\sigma$ = `r tail(VIX, 1)` et $S$ =`r tail(SP500, 1)`
+
+La formule de Black-Scholes pour le Call:
+
+$$
+Call(S, K, \sigma, r, T) = S \Phi(d_1)-Ke^{-rT} \Phi(d_2)
+\\
+d_1 = \frac{ln(\frac{S}{K}) + (r+\frac{\sigma^2}{2})T}{\sigma \sqrt{T}}
+\\
+d_2 = d_1 - \sigma \sqrt{T}
+$$
+
+Nous allons appliquer l'interpolation linéaire pour calclueler le taux d'intérêt
+
+$$
+r = r_1 + (r_2-r_1) \times \frac{t-t_1}{t_2 - t_1}
+$$
+
+```{r echo=FALSE}
+name <- c("1", "7", "30", "90", "180", "270", "1", "2", "3", "4", "5", "7", "10", "30")
+names(rf) <- name
+```
+
+```{r echo=FALSE}
+# Calcule du taux pour t=20
+t <- 20
+t1 <- 7
+t2 <- 30
+r1 <- rf["7"]
+r2 <- rf["30"]
+r20 <- f_interpolate(t1, r1, t2, r2, t)
+
+# Calcule du taux pour t=20
+t <- 40
+t1 <- 30
+t2 <- 90
+r1 <- rf["30"]
+r2 <- rf["90"]
+r40 <- f_interpolate(t1, r1, t2, r2, t)
+
+# Calcule du Call
+s <- tail(SP500, 1)
+sigma <- tail(VIX, 1)
+r <- c(r20, r20, r40, r40)
+t <- c(20, 20, 40, 40)
+k <- c(1600, 1650, 1750, 1800)
+
+prix <- rep(NA, 4)
+
+for(i in 1:4)
+{
+  prix[i] <- f_BS(s = s, k = k[i], sigma = sigma, r = r[i], t = t[i]/250)
+}
+
+names(prix) <- c("Call(K= 1600, T = 20)", "Call(K = 1650, T = 20)", 
+                    "Call(K = 1750, T = 40)", "Call(K = 1800, T = 40)")
+
+prix %>% kbl(col.names = "Prix") %>%
+  kable_paper("hover", full_width = F)
+```
+
+Le prix du portefeuille est : $\sum_{i=1}^4Call_i(S, K_i)$ = `r round(sum(prix), 3)`
+
+# Un facteur de risque et une modèle gaussien
+
+```{r echo=FALSE}
+# Calcule du rendement logarithmique
+rets <- Return.calculate(prices = SP500 , method = "log")
+rets <- rets[-1,] 
+```
+
+```{r echo=FALSE}
+n_day <- 5
+n_sim <- 10000
+
+mu <- mean(rets)
+sigma <- sd(rets)
+s <- tail(SP500, 1)
+t <- 1/250
+
+# Simulation du rendement
+simul <- f_sim(s, n_sim, n_day, mu, sigma, t)
+sj <- simul[, n_day+1]
+
+# Graphique des simulation du s-j
+matplot(t(simul), type = "l" , ylab = "Prix du S-J")
+```
+
+Le rendement du sous-jacent suit une loi `gaussienne`, avec les paramètres suivant :
+
+$$
+\hat{\mu} = \frac{1}{N} \sum{r_i} =  0
+\\
+\hat{\sigma} = \sqrt{\frac{1}{N-1} \sum{(r_i - \hat{\mu})^2}} = 0.013326
+$$
+
+Soit une simulation de rendement sur 5 jours $r_1 \dots r_5$ et le dernier prix du sous-jecent $S_0$. le prix du sous-jacent dans les 5 jours est $S_1 = S_0 \times e^{r_1}, \ S_2 = S_0 \times e^{r_1+r_2}, \dots,S_5=S_0 \times e^{r_1+\dots +r_5}$.
+
+$r_i = (\mu- \frac{\sigma^2}{2})\times t+ \sigma \sqrt{t}Z_i$ avec $Z_i \sim N(0,1)$
+
+Nous allons calculer le prix du portefeuille en se basant sur les differents $S_{5,i}$. $i \in \{1,\dots, 10000\}$ de la même maniére qu'avant en tenant en changant les taux d'intérêts et les échéances.
+
+$$
+K = 1600, \ T =15
+\\
+K = 1650, \ T =15
+\\
+K = 1750, \ T =35
+\\
+K = 1800, \ T =35
+\\
+$$
+
+```{r echo=FALSE}
+# Calcule du taux pour t=15
+t <- 15
+t1 <- 7
+t2 <- 30
+r1 <- rf["7"]
+r2 <- rf["30"]
+r15 <- f_interpolate(t1, r1, t2, r2, t)
+
+# Calcule du taux pour t=35
+t <- 35
+t1 <- 30
+t2 <- 90
+r1 <- rf["30"]
+r2 <- rf["90"]
+r35 <- f_interpolate(t1, r1, t2, r2, t)
+
+sigma <- tail(VIX, 1)
+r <- c(r15, r15, r35, r35)
+t <- c(15, 15, 35, 35)
+k <- c(1600, 1650, 1750, 1800)
+
+pf_prices <- rep(NA, n_sim)
+
+#prix temporaire de chaque Call
+temp <- rep(NA, 4)
+
+for(i in 1:n_sim)
+{
+  for(j in 1:4)
+  {
+    temp[j] <- f_BS(s = sj[i], k = k[j], sigma = sigma, r = r[j], t = t[j]/250)
+  }
+  
+  pf_prices[i] <- ((sum(temp) - sum(prix))/sum(prix))*100
+}
+
+# Distribution du prix du portefeuille
+hist(pf_prices, nclass = round(10 * log(n_sim)))
+plot(pf_prices, type = "l", ylab = "", main = "Distribution du prix du portefeuille")
+```
+
+Nous allons maintenant calculer $VaR_{95\%}$ et $ES_{95\%}$
+
+$$
+VaR_{95\%} = F^{-1}_X(0.05)
+\\
+ES_{95\%} = \mathbb{E}[X|X\leq VaR_{95\%}]
+$$
+
+```{r echo=FALSE}
+kappa <- 0.95 
+
+VaR_95 <- quantile(pf_prices, 1-kappa)
+ES_95 <- mean(pf_prices[pf_prices <= VaR_95])
+
+result <- c(VaR_95, ES_95)
+names(result) <- c("VaR 95%", "ES 95%")
+
+result %>% kbl(col.names = "P&L") %>%
+  kable_paper("hover", full_width = F)
+```
+
+# Deux facteurs de risque et modèle gaussien
+
+Dans cette partie, nous allons conciderer une distribution normal bivariee pour simuler le mouvement Brownien du `SP500` et du `VIX`.
+
+```{r echo=FALSE}
+
+# Retour log du VIX
+rets_vix <- Return.calculate(prices = VIX , method = "log")
+rets_vix <- rets_vix[-1,] 
+
+
+n_day <- 5
+n_sim <- 10000
+
+mu <- c(mean(rets), mean(rets_vix))
+sigma <- c(sd(rets), sd(rets_vix))
+phi <- cor(rets, rets_vix)
+s <- tail(SP500, 1)
+svix <- tail(VIX, 1)
+t <- 1/250
+
+# Simulation du rendement du VIX et du S-J
+simul_sp_vix <- f_simBV(s, svix, n_sim, n_day, mu, sigma, phi, t)
+
+# Graphique des simulation du vix
+matplot(t(simul_sp_vix[[1]]), type = "l" , ylab = "SP500")
+matplot(t(simul_sp_vix[[2]]), type = "l" , ylab = "VIX")
+
+```
+
+```{r echo=FALSE}
+s <- simul_sp_vix[[1]][, n_day+1]
+sigma <- simul_sp_vix[[2]][, n_day+1]
+
+pf_prices <- rep(NA, n_sim)
+
+r <- c(r15, r15, r35, r35)
+t <- c(15, 15, 35, 35)
+
+#prix temporaire de chaque Call
+temp <- rep(NA, 4)
+
+for(i in 1:n_sim)
+{
+  for(j in 1:4)
+  {
+    temp[j] <- f_BS(s = s[i], k = k[j], sigma = sigma[i], r = r[j], t = t[j]/250)
+  }
+  
+  pf_prices[i] <- ((sum(temp) - sum(prix))/sum(prix))*100
+  temp <- rep(NA, 4)
+}
+
+# Distribution du prix du portefeuille
+hist(pf_prices, nclass = round(10 * log(n_sim)))
+plot(pf_prices, type = "l", ylab = "", main = "Distribution du prix du portefeuille")
+```
+
+Nous allons maintenant calculer $VaR_{95\%}$ et $ES_{95\%}$
+
+$$
+VaR_{95\%} = F^{-1}_X(0.05)
+\\
+ES_{95\%} = \mathbb{E}[X|X\leq VaR_{95\%}]
+$$
+
+```{r echo=FALSE}
+kappa <- 0.95 
+
+VaR_95 <- quantile(pf_prices, 1-kappa)
+ES_95 <- mean(pf_prices[pf_prices <= VaR_95])
+
+result <- c(VaR_95, ES_95)
+names(result) <- c("VaR 95%", "ES 95%")
+
+result %>% kbl(col.names = "P&L en %") %>%
+  kable_paper("hover", full_width = F)
+```
+
+
+# Deux facteurs de risque et modèle copule-marginal (Student-t et copule gaussienne)
+
+Tout dabord, pour chaqu'une des `10000` simulations, on genere `5` couples d'observations $\{u_1, u_2\}$. Ensuite, on calcule la quantille $Z_1 =F_{X_1}^{-1}(u_1), Z_2 =F_{X_2}^{-1}(u_2)$ ou $X_1 \sim Student(10)$ et $X_2 \sim Student(5)$.
+
+Pour avoir l'evolution du `sous-jacent` et du `VIX` dans `5` jours, on applique cette formule : $S_i = S_{i-1} \times e^{v_i}$ et  $VIX_i = VIX_{i-1} \times e^{w_i}$.
+
+avec :
+
+$v_i = (\mu_1- \frac{\sigma_1^2}{2})\times t+ \sigma_1 \sqrt{t}Z_1$
+
+$w_i = (\mu_2- \frac{\sigma_2^2}{2})\times t+ \sigma_2 \sqrt{t}Z_2$
+
+
+```{r echo=FALSE}
+## Fit marginals by MLE
+fit1 <- suppressWarnings(
+  fitdistr(x = rets, densfun = "t", df = 10))
+theta1 <- fit1$estimate
+
+fit2 <- suppressWarnings(fitdistr(x = rets_vix, densfun = "t", df = 5))
+theta2 <- fit2$estimate
+
+U1 <- pstd(rets, mean = theta1[1], sd = theta1[2], nu = 10)
+U2 <- pstd(rets_vix, mean = theta2[1], sd = theta2[2], nu = 5)
+
+U <- cbind(U1, U2)
+plot(as.matrix(U), pch = 20, cex = 0.9)
+
+C <- normalCopula(dim = 2)
+fit <- fitCopula(C, data = as.matrix(U), method = "ml")
+```
+
+```{r echo=FALSE}
+# Siulation des données
+s <- tail(SP500, 1)
+svix <- tail(VIX, 1)
+t <- 1/250
+
+# Simulation du rendement du VIX et du S-J
+simul_sp_vix <- f_simCP(s, svix, n_day, n_sim, theta1, theta2, fit, t)
+
+# Graphique des simulation du vix
+matplot(t(simul_sp_vix[[1]]), type = "l" , ylab = "SP500")
+matplot(t(simul_sp_vix[[2]]), type = "l" , ylab = "VIX")
+```
+
+```{r echo=FALSE}
+s <- simul_sp_vix[[1]][, n_day+1]
+sigma <- simul_sp_vix[[2]][, n_day+1]
+
+pf_prices <- rep(NA, n_sim)
+
+r <- c(r15, r15, r35, r35)
+t <- c(15, 15, 35, 35)
+
+#prix temporaire de chaque Call
+temp <- rep(NA, 4)
+
+for(i in 1:n_sim)
+{
+  for(j in 1:4)
+  {
+    temp[j] <- f_BS(s = s[i], k = k[j], sigma = sigma[i], r = r[j], t = t[j]/250)
+  }
+  
+  pf_prices[i] <- ((sum(temp) - sum(prix))/sum(prix))*100
+  temp <- rep(NA, 4)
+}
+
+# Distribution du prix du portefeuille
+hist(pf_prices, nclass = round(10 * log(n_sim)))
+plot(pf_prices, type = "l", ylab = "", main = "Distribution du prix du portefeuille")
+```
+
+
+```{r echo=FALSE}
+kappa <- 0.95 
+
+VaR_95 <- quantile(pf_prices, 1-kappa)
+ES_95 <- mean(pf_prices[pf_prices <= VaR_95])
+
+result <- c(VaR_95, ES_95)
+names(result) <- c("VaR 95%", "ES 95%")
+
+result %>% kbl(col.names = "P&L") %>%
+  kable_paper("hover", full_width = F)
+```
+
+# Surface de volatilité
+
+## 1 Estimation des parametres
+
+La surface de volatiulite pourrait etre vu comme une regression lineaire. Alors, on peut estimer $\alpha_i$ en utlisant `MSE`
+
+$$
+\hat{\sigma(m, \tau)} = \hat{\alpha_1}+\hat{\alpha_2}(m-1)^2+\hat{\alpha_3}(m-1)^3 +\hat{\alpha_4} \sqrt\tau
+$$
+
+On commence par combiner les donnees `Call` et `Put`, esuite on calcule le `m` en se basant sur la derniere observation du sous-jacent et on l'ajoute au donnees
+
+```{r echo=FALSE}
+# combiner Call et Put
+df_option <- as.data.frame(rbind(call, put))
+
+#calcule de m-1
+df_option$m <-  (df_option$K / as.vector(tail(SP500, 1))) -1
+
+# model
+fit <- glm(IV ~ 1 + I(m^2) + I(m^3) + I(sqrt(tau)), data = df_option, family = gaussian(link = "identity"))
+alpha <- fit$coefficients
+```
+
+```{r echo=FALSE}
+summary(fit)
+```
+
+Selon la sortie, 
+
+$$
+\hat{\alpha_1} = 0.291076
+\\
+\hat{\alpha_2} = 0.870782 
+\\
+\hat{\alpha_3} = -0.064825
+\\
+\hat{\alpha_4} = -0.151530
+$$
+
+## 2 Prix du portfeuille
+
+On reprent la simulation d'un facteur de risque et un modele gaussien 
+
+```{r echo=FALSE}
+## Calculer la valur de m-1 pour chque option
+m <- (k / as.vector(tail(SP500, 1))) -1
+tau <- c(15, 15, 35, 35)/250
+df_test <- data.frame(m , tau)
+
+#calcule de sufrace
+sigma_sf <- predict(fit, df_test) - (alpha[1]+alpha[4])
+
+# calcule du portefeuille
+
+pf_prices <- rep(NA, n_sim)
+
+#prix temporaire de chaque Call
+temp <- rep(NA, 4)
+
+for(i in 1:n_sim)
+{
+  for(j in 1:4)
+  {
+    temp[j] <- f_BS(s = sj[i], k = k[j], sigma = sigma_sf[j], r = r[j], t = tau[j])
+  }
+  
+  pf_prices[i] <- ((sum(temp) - sum(prix))/sum(prix))*100
+}
+
+# Distribution du prix du portefeuille
+hist(pf_prices, nclass = round(10 * log(n_sim)))
+plot(pf_prices, type = "l", ylab = "", main = "Distribution du prix du portefeuille")
+```
+
+```{r echo=FALSE}
+kappa <- 0.95 
+
+VaR_95 <- quantile(pf_prices, 1-kappa)
+ES_95 <- mean(pf_prices[pf_prices <= VaR_95])
+
+result <- c(VaR_95, ES_95)
+names(result) <- c("VaR 95%", "ES 95%")
+
+result %>% kbl(col.names = "P&L en %") %>%
+  kable_paper("hover", full_width = F)
+```
